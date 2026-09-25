@@ -35,7 +35,7 @@ the `beacon memory evaluations` docs; installing approved memory as an Agent Ski
 - A **candidate** is a proposed memory in state `candidate`, `approved`, `rejected` or
   `superseded`. One with a `source_evaluation_id` came from Jev and carries the
   placeholder body. One without was written by a reviewer with `candidates create`.
-- A **memory** is what approval produces. `approved list` shows only memories that are
+- A **memory** is what approval produces. `beacon memory list` shows only memories that are
   not superseded, which is also what the MCP tools serve.
 - **Kinds**: `workflow` (a sequence that works here), `correction` (something an agent
   did that had to be undone), `debugging_pattern` (symptom to cause to fix),
@@ -55,11 +55,11 @@ the `beacon memory evaluations` docs; installing approved memory as an Agent Ski
 - **Project** is the repository a trace recorded, resolved to its git root and remote,
   so a linked worktree resolves to the same project as its main checkout. Commands
   that start from a trace scope to that repository. Commands that list
-  (`candidates list`, `approved list`) scope to the current directory unless you pass
+  (`candidates list`, `beacon memory list`) scope to the current directory unless you pass
   `--project <path>`, so a listing from the wrong directory reads as empty when it is
   not.
 - **`supersede` takes the old candidate's ID and the new memory's ID.** Memories carry
-  their `candidate_id`; read it from `approved show --json` rather than guessing.
+  their `candidate_id`; read it from `beacon memory show --json` rather than guessing.
 
 ## Where things are
 
@@ -69,17 +69,18 @@ the `beacon memory evaluations` docs; installing approved memory as an Agent Ski
 | One session's events | `beacon endpoint traces show <trace-id> --json --event-type user_message,tool_call,command,tool_result,approval,error --limit <n> --offset <k> > <file>`: bounded window; `range.total_events` counts the filtered events, so it says how much you have not read |
 | Pending Jev placeholders | `beacon memory candidates list --state candidate --json --project <path>` |
 | Everything already reviewed for a repo | `beacon memory candidates list --json --project <path>`: every state; `evidence[].trace_id` is the ledger of traces already turned into candidates |
-| What agents are served today | `beacon memory approved list --json --project <path>`, then `approved show <memory-id>` |
+| What agents are served today | `beacon memory list --json --project <path>`, then `beacon memory show <memory-id>` |
 | Record a lesson from a trace you read | `beacon memory candidates create --trace <id> --kind <kind> --title <t> --body-file - [--applicability <a>] [--tag <t>]...` |
 | Approve, optionally fixing the text | `beacon memory candidates approve <candidate-id> --reason <why> [--kind] [--title] [--body-file -] [--applicability]` |
 | Decline a candidate | `beacon memory candidates reject <candidate-id> --reason <why>` |
 | Replace an older memory | `beacon memory candidates supersede <old-candidate-id> --replacement <new-memory-id> --reason <why>` |
 
 Write multi-line bodies to a file and pass `--body-file <path>`, or pipe them through
-`--body-file -`, rather than quoting them on the command line. Every `--json` listing
-prints `null` when empty, not `[]`. Where the session also has Beacon's MCP tools,
-`search_activity` and `get_activity_event` read the same log and `search_memory` reads
-the same store, but the write path is the CLI only.
+`--body-file -`, rather than quoting them on the command line. `beacon memory list --json`
+prints `[]` when empty, but `candidates list --json` prints `null`; handle both. Where
+the session also has Beacon's MCP tools, `search_activity` and `get_activity_event`
+read the same log and `search_memory` reads the same store, but the write path is the
+CLI only.
 
 `traces show` on a large log takes tens of seconds unfiltered and can exceed a tool
 timeout; the event-type filter above brings it to seconds. Always redirect the JSON to a
@@ -148,7 +149,7 @@ it in the reply.
 4. **Decide.** A session earns a memory only when all four hold: a future agent in this
    repository would act differently for knowing it; the trace itself shows the evidence
    (a failed command and what ran instead, a user correction and what followed, a
-   convention stated and applied); it is not already in `approved list` or in the
+   convention stated and applied); it is not already in `beacon memory list` or in the
    repository's own docs; and it contains nothing that must not be served (tokens,
    customer names, paths under a home directory that identify a person). Because the
    log holds commands but not their output, the strongest evidence is a `tool_result`
@@ -160,7 +161,7 @@ it in the reply.
    naming what would retire the memory (a doc fix, a renamed flag). Applicability as the
    moment a future agent should reach for it. When the lesson refines an existing
    memory, create and approve the new one, then `supersede` the old candidate with the
-   new memory ID. Done when `approved show` prints the text you meant.
+   new memory ID. Done when `beacon memory show` prints the text you meant.
 
 When the request says "show me first" or "propose", run steps 1 to 5 but stop before
 `approve`: create the candidates, and put their IDs and text in the reply for a person
