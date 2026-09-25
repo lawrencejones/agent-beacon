@@ -42,6 +42,14 @@ func CandidateFromEvaluation(eval asymptoteobserve.LearningEvaluationV1) (asympt
 }
 
 func ApproveCandidate(store *Store, id, reason string) (asymptoteobserve.LearningCandidateV1, asymptoteobserve.LearningMemoryV1, error) {
+	return ApproveCandidateWithContent(store, id, reason, CandidateContent{})
+}
+
+// ApproveCandidateWithContent approves a candidate after replacing the fields that
+// content sets, so the candidate and the memory it creates carry the same text. It is
+// how a reviewer turns an evaluator-derived candidate, whose body is a score placeholder
+// rather than a lesson, into memory worth serving.
+func ApproveCandidateWithContent(store *Store, id, reason string, content CandidateContent) (asymptoteobserve.LearningCandidateV1, asymptoteobserve.LearningMemoryV1, error) {
 	candidate, ok, err := store.GetCandidate(id)
 	if err != nil {
 		return asymptoteobserve.LearningCandidateV1{}, asymptoteobserve.LearningMemoryV1{}, err
@@ -51,6 +59,10 @@ func ApproveCandidate(store *Store, id, reason string) (asymptoteobserve.Learnin
 	}
 	if candidate.State != asymptoteobserve.LearningCandidateStateCandidate {
 		return asymptoteobserve.LearningCandidateV1{}, asymptoteobserve.LearningMemoryV1{}, fmt.Errorf("candidate %s is %s, not candidate", id, candidate.State)
+	}
+	candidate, err = applyContent(candidate, content)
+	if err != nil {
+		return asymptoteobserve.LearningCandidateV1{}, asymptoteobserve.LearningMemoryV1{}, err
 	}
 	now := nowString()
 	memory := asymptoteobserve.LearningMemoryV1{

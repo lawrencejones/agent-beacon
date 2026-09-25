@@ -11,7 +11,8 @@ approved project memory.
 The commands are grouped by resource:
 
 - `beacon memory evaluations run|list|show`
-- `beacon memory candidates list|show|approve|reject|supersede`
+- `beacon memory candidates list|show|create|approve|reject|supersede`
+- `beacon memory approved list|show`
 - `beacon memory skills preview|install`
 
 All subcommands accept the common endpoint and project-scope flags:
@@ -21,13 +22,19 @@ All subcommands accept the common endpoint and project-scope flags:
 | `--user` | Use per-user endpoint paths. Enabled by default |
 | `--system` | Use system endpoint paths |
 | `--log-path <path>` | Runtime JSONL log path |
-| `--project <path>` | Project path for memory scoping. Defaults to the current directory |
+| `--project <path>` | Project path for memory scoping. Defaults to the trace's repository, then the current directory |
 | `--json` | Print machine-readable JSON |
 
 Beacon stores learning artifacts in `memory.db` next to the resolved endpoint base
 directory for the runtime log. The store is durable local state and is scoped by
 the resolved project ID, so approved memory for one repository is not automatically
 returned for another.
+
+Commands that start from a trace (`evaluations run` and `candidates create`) scope
+the result to the repository the trace recorded, so memory lands with the project the
+agent was working in rather than wherever you ran the command. Pass `--project` to
+override that. Commands that list or look up records use `--project` or the current
+directory.
 
 ## Evaluate traces
 
@@ -63,12 +70,47 @@ Useful flags:
 `--jev-endpoint` can also come from `BEACON_JEV_ENDPOINT`, and the model can come
 from `BEACON_JEV_MODEL`.
 
+Without `--trace`, the selection skips traces that are a single event with no
+session, such as OTLP metric samples. They carry nothing to learn from, and each
+fresh sample would otherwise sort above the real sessions and consume the run's
+Jev calls.
+
 List and inspect stored evaluations:
 
 ```bash
 beacon memory evaluations list --limit 25
 beacon memory evaluations show <evaluation-id>
 ```
+
+## Write a candidate yourself
+
+Jev scores a trace; it does not read it. When you, or an agent acting for you, have
+read a trace and know the lesson, write the candidate directly:
+
+```bash
+beacon memory candidates create \
+  --trace session:claude_code:03d6d4a7-... \
+  --kind gotcha \
+  --title "Package smoke needs a warm cache" \
+  --body "The first smoke run after a clean checkout fails on cache misses. Run it twice."
+```
+
+Flags:
+
+- `--trace <id>` is the trace the lesson came from (required). Its events become
+  the candidate's evidence.
+- `--kind <kind>` is one of `workflow`, `correction`, `debugging_pattern`, `gotcha`,
+  or `convention`.
+- `--title <text>` and `--body <text>` are the lesson. Use `--body-file <path>`, or
+  `--body-file -` to read stdin, for a multi-line body.
+- `--applicability <text>` says when a future agent should apply it. It defaults to a
+  generic project-wide statement.
+- `--tag <tag>` adds a tag; repeat it for several. Without tags Beacon records
+  `beacon`, the kind, and the harness.
+
+The candidate waits for `candidates approve` like any other. It has no
+`source_evaluation_id`, which is how you can tell an authored candidate from a
+Jev-scored one in `candidates list --json`.
 
 ## Review candidates
 
@@ -102,6 +144,21 @@ Approve a candidate into project memory:
 beacon memory candidates approve <candidate-id> --reason "reviewed"
 ```
 
+The approved memory carries the candidate's text word for word. A Jev-scored
+candidate's body is the placeholder above, so replace it as you approve:
+
+```bash
+beacon memory candidates approve <candidate-id> \
+  --reason "read the trace" \
+  --kind debugging_pattern \
+  --title "Retry package smoke once" \
+  --body-file lesson.md
+```
+
+`--kind`, `--title`, `--body`, `--body-file`, `--applicability`, and `--tag` are the
+same flags as `candidates create`. Only the ones you pass are replaced, and the
+candidate is updated to match so the review record and the memory agree.
+
 Reject or supersede candidates:
 
 ```bash
@@ -109,9 +166,21 @@ beacon memory candidates reject <candidate-id> --reason "too specific"
 beacon memory candidates supersede <candidate-id> --replacement <memory-id>
 ```
 
-Approving creates an approved memory record for the resolved project. Rejecting and
+Approving creates an approved memory record for the candidate's project. Rejecting and
 superseding preserve the review transition with the optional `--reason` so later
 reviews can explain why a candidate was not installed.
+
+## Inspect approved memory
+
+List the approved memory for the project that is not superseded, and read one entry:
+
+```bash
+beacon memory approved list --kind gotcha
+beacon memory approved show <memory-id>
+```
+
+This is the same set the MCP tools return. Check it before approving a new candidate
+so a lesson that already exists is superseded rather than duplicated.
 
 ## Install Agent Skills
 

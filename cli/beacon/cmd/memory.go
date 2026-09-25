@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -16,31 +17,38 @@ import (
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 )
 
-var memoryOpts struct {
-	userMode    bool
-	systemMode  bool
-	logPath     string
-	jsonOutput  bool
-	projectPath string
-	limit       int
-	page        int
-	query       string
-	harness     string
-	traceID     string
-	since       string
-	until       string
-	dryRun      bool
-	jevEndpoint string
-	jevAPIKey   string
-	jevModel    string
-	jevCost     float64
-	timeout     time.Duration
-	state       string
-	kind        string
-	reason      string
-	replacement string
-	force       bool
+type memoryOptions struct {
+	userMode      bool
+	systemMode    bool
+	logPath       string
+	jsonOutput    bool
+	projectPath   string
+	limit         int
+	page          int
+	query         string
+	harness       string
+	traceID       string
+	since         string
+	until         string
+	dryRun        bool
+	jevEndpoint   string
+	jevAPIKey     string
+	jevModel      string
+	jevCost       float64
+	timeout       time.Duration
+	state         string
+	kind          string
+	reason        string
+	replacement   string
+	force         bool
+	title         string
+	body          string
+	bodyFile      string
+	applicability string
+	tags          []string
 }
+
+var memoryOpts memoryOptions
 
 var memoryCmd = &cobra.Command{
 	Use:   "memory",
@@ -94,9 +102,27 @@ var memoryCandidatesShowCmd = &cobra.Command{
 	RunE:         runMemoryCandidatesShow,
 }
 
+var memoryCandidatesCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Write a memory candidate for a trace you have reviewed",
+	Long: `Write a memory candidate for a trace you have reviewed.
+
+Unlike "evaluations run", no evaluator is involved: you read the trace and state the
+lesson. The candidate records the trace and its events as evidence and waits for
+"candidates approve" like any other. Memory is scoped to the trace's repository when
+it recorded one, otherwise to --project or the current directory.`,
+	SilenceUsage: true,
+	RunE:         runMemoryCandidatesCreate,
+}
+
 var memoryCandidatesApproveCmd = &cobra.Command{
-	Use:          "approve <candidate-id>",
-	Short:        "Approve a candidate into project memory",
+	Use:   "approve <candidate-id>",
+	Short: "Approve a candidate into project memory",
+	Long: `Approve a candidate into project memory.
+
+The approved memory carries the candidate's text. Pass --title, --body, --body-file,
+--kind or --applicability to replace that text first, which is how an evaluator-scored
+candidate with a placeholder body becomes a lesson worth serving.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runMemoryCandidatesApprove,
@@ -116,6 +142,26 @@ var memoryCandidatesSupersedeCmd = &cobra.Command{
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runMemoryCandidatesSupersede,
+}
+
+var memoryApprovedCmd = &cobra.Command{
+	Use:   "approved",
+	Short: "Inspect approved project memory",
+}
+
+var memoryApprovedListCmd = &cobra.Command{
+	Use:          "list",
+	Short:        "List approved memory that is not superseded",
+	SilenceUsage: true,
+	RunE:         runMemoryApprovedList,
+}
+
+var memoryApprovedShowCmd = &cobra.Command{
+	Use:          "show <memory-id>",
+	Short:        "Show one approved memory",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runMemoryApprovedShow,
 }
 
 var memorySkillsCmd = &cobra.Command{
@@ -155,34 +201,50 @@ func init() {
 	rootCmd.AddCommand(memoryCmd)
 	memoryCmd.AddCommand(memoryEvaluationsCmd)
 	memoryCmd.AddCommand(memoryCandidatesCmd)
+	memoryCmd.AddCommand(memoryApprovedCmd)
 	memoryCmd.AddCommand(memorySkillsCmd)
 	memoryEvaluationsCmd.AddCommand(memoryEvaluationsRunCmd)
 	memoryEvaluationsCmd.AddCommand(memoryEvaluationsListCmd)
 	memoryEvaluationsCmd.AddCommand(memoryEvaluationsShowCmd)
 	memoryCandidatesCmd.AddCommand(memoryCandidatesListCmd)
 	memoryCandidatesCmd.AddCommand(memoryCandidatesShowCmd)
+	memoryCandidatesCmd.AddCommand(memoryCandidatesCreateCmd)
 	memoryCandidatesCmd.AddCommand(memoryCandidatesApproveCmd)
 	memoryCandidatesCmd.AddCommand(memoryCandidatesRejectCmd)
 	memoryCandidatesCmd.AddCommand(memoryCandidatesSupersedeCmd)
+	memoryApprovedCmd.AddCommand(memoryApprovedListCmd)
+	memoryApprovedCmd.AddCommand(memoryApprovedShowCmd)
 	memorySkillsCmd.AddCommand(memorySkillsPreviewCmd)
 	memorySkillsCmd.AddCommand(memorySkillsInstallCmd)
 
-	for _, c := range []*cobra.Command{memoryEvaluationsRunCmd, memoryEvaluationsListCmd, memoryEvaluationsShowCmd, memoryCandidatesListCmd, memoryCandidatesShowCmd, memoryCandidatesApproveCmd, memoryCandidatesRejectCmd, memoryCandidatesSupersedeCmd, memorySkillsPreviewCmd, memorySkillsInstallCmd} {
+	for _, c := range []*cobra.Command{memoryEvaluationsRunCmd, memoryEvaluationsListCmd, memoryEvaluationsShowCmd, memoryCandidatesListCmd, memoryCandidatesShowCmd, memoryCandidatesCreateCmd, memoryCandidatesApproveCmd, memoryCandidatesRejectCmd, memoryCandidatesSupersedeCmd, memoryApprovedListCmd, memoryApprovedShowCmd, memorySkillsPreviewCmd, memorySkillsInstallCmd} {
 		c.Flags().BoolVar(&memoryOpts.userMode, "user", true, "Use per-user endpoint paths")
 		c.Flags().BoolVar(&memoryOpts.systemMode, "system", false, "Use system endpoint paths")
 		c.Flags().StringVar(&memoryOpts.logPath, "log-path", "", "Runtime JSONL log path")
 		c.Flags().BoolVar(&memoryOpts.jsonOutput, "json", false, "Print machine-readable JSON")
-		c.Flags().StringVar(&memoryOpts.projectPath, "project", "", "Project path for memory scoping (defaults to current directory)")
+		c.Flags().StringVar(&memoryOpts.projectPath, "project", "", "Project path for memory scoping (defaults to the trace's repository, then the current directory)")
 	}
-	for _, c := range []*cobra.Command{memoryEvaluationsRunCmd, memoryEvaluationsListCmd, memoryCandidatesListCmd} {
+	for _, c := range []*cobra.Command{memoryEvaluationsRunCmd, memoryEvaluationsListCmd, memoryCandidatesListCmd, memoryApprovedListCmd} {
 		c.Flags().IntVar(&memoryOpts.limit, "limit", 25, "Limit returned traces or evaluations")
 		c.Flags().IntVar(&memoryOpts.page, "page", 1, "Page number for collection output")
 		c.Flags().StringVarP(&memoryOpts.query, "query", "q", "", "Free-text query")
 	}
 	memoryCandidatesListCmd.Flags().StringVar(&memoryOpts.state, "state", "", "Filter candidates by state")
-	memoryCandidatesListCmd.Flags().StringVar(&memoryOpts.kind, "kind", "", "Filter candidates by memory kind")
+	for _, c := range []*cobra.Command{memoryCandidatesListCmd, memoryApprovedListCmd} {
+		c.Flags().StringVar(&memoryOpts.kind, "kind", "", "Filter by memory kind")
+	}
 	for _, c := range []*cobra.Command{memoryCandidatesApproveCmd, memoryCandidatesRejectCmd, memoryCandidatesSupersedeCmd} {
 		c.Flags().StringVar(&memoryOpts.reason, "reason", "", "Review reason recorded with the candidate")
+	}
+	memoryCandidatesCreateCmd.Flags().StringVar(&memoryOpts.traceID, "trace", "", "Trace ID the lesson was learned from (required)")
+	_ = memoryCandidatesCreateCmd.MarkFlagRequired("trace")
+	for _, c := range []*cobra.Command{memoryCandidatesCreateCmd, memoryCandidatesApproveCmd} {
+		c.Flags().StringVar(&memoryOpts.kind, "kind", "", "Memory kind: "+strings.Join(learning.MemoryKinds, ", "))
+		c.Flags().StringVar(&memoryOpts.title, "title", "", "One-line memory title")
+		c.Flags().StringVar(&memoryOpts.body, "body", "", "Memory body: the lesson a future agent should apply")
+		c.Flags().StringVar(&memoryOpts.bodyFile, "body-file", "", "Read the memory body from this file, or - for stdin")
+		c.Flags().StringVar(&memoryOpts.applicability, "applicability", "", "When a future agent should apply this memory")
+		c.Flags().StringArrayVar(&memoryOpts.tags, "tag", nil, "Tag to record on the memory (repeatable)")
 	}
 	memoryCandidatesSupersedeCmd.Flags().StringVar(&memoryOpts.replacement, "replacement", "", "Approved memory ID that supersedes this candidate")
 	memorySkillsInstallCmd.Flags().BoolVar(&memoryOpts.force, "force", false, "Overwrite an existing generated skill")
@@ -204,7 +266,7 @@ func runMemoryEvaluationsRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	store := memoryStore()
-	inputs, err := selectedEvaluationInputs(project)
+	inputs, err := selectedEvaluationInputs()
 	if err != nil {
 		return err
 	}
@@ -337,8 +399,46 @@ func runMemoryCandidatesShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runMemoryCandidatesCreate(cmd *cobra.Command, args []string) error {
+	if strings.TrimSpace(memoryOpts.traceID) == "" {
+		return fmt.Errorf("--trace is required")
+	}
+	content, err := candidateContentFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+	show, ok, err := dashboard.ShowTrace(memoryLogPath(), memoryOpts.traceID, dashboard.TraceQuery{Limit: 2000})
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("trace not found: %s", memoryOpts.traceID)
+	}
+	project, err := learning.ProjectForTrace(memoryOpts.projectPath, show.Trace)
+	if err != nil {
+		return err
+	}
+	candidate, err := learning.CandidateFromTrace(project, show, content)
+	if err != nil {
+		return err
+	}
+	store := memoryStore()
+	if err := store.PutCandidate(candidate); err != nil {
+		return err
+	}
+	if memoryOpts.jsonOutput {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(candidate)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Created candidate %s (%s) for project %s\n", candidate.ID, candidate.Kind, firstNonEmpty(project.Path, project.ID))
+	return nil
+}
+
 func runMemoryCandidatesApprove(cmd *cobra.Command, args []string) error {
-	candidate, memory, err := learning.ApproveCandidate(memoryStore(), args[0], memoryOpts.reason)
+	content, err := candidateContentFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+	candidate, memory, err := learning.ApproveCandidateWithContent(memoryStore(), args[0], memoryOpts.reason, content)
 	if err != nil {
 		return err
 	}
@@ -370,6 +470,50 @@ func runMemoryCandidatesSupersede(cmd *cobra.Command, args []string) error {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(candidate)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Superseded %s with %s\n", candidate.ID, candidate.SupersededBy)
+	return nil
+}
+
+func runMemoryApprovedList(cmd *cobra.Command, args []string) error {
+	query, err := memoryQuery()
+	if err != nil {
+		return err
+	}
+	query.Kind = memoryOpts.kind
+	memories, err := memoryStore().ListMemories(query)
+	if err != nil {
+		return err
+	}
+	if memoryOpts.jsonOutput {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(memories)
+	}
+	for _, memory := range memories {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", memory.ID, memory.Kind, memory.Title)
+	}
+	return nil
+}
+
+func runMemoryApprovedShow(cmd *cobra.Command, args []string) error {
+	memory, ok, err := memoryStore().GetMemory(args[0])
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("memory not found: %s", args[0])
+	}
+	if memoryOpts.jsonOutput {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(memory)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", memory.ID, memory.Kind)
+	fmt.Fprintln(cmd.OutOrStdout(), memory.Title)
+	fmt.Fprintln(cmd.OutOrStdout())
+	fmt.Fprintln(cmd.OutOrStdout(), memory.Body)
+	if memory.Applicability != "" {
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "Applies: "+memory.Applicability)
+	}
+	if memory.SupersededBy != "" {
+		fmt.Fprintln(cmd.OutOrStdout(), "Superseded by: "+memory.SupersededBy)
+	}
 	return nil
 }
 
@@ -407,7 +551,12 @@ func runMemorySkillsInstall(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func selectedEvaluationInputs(project asymptoteobserve.LearningProjectV1) ([]learning.EvaluationInput, error) {
+// selectedEvaluationInputs picks the traces to evaluate. Each trace is scoped to its
+// own repository through ProjectForTrace unless --project pins one. Without --trace,
+// traces that are a single event with no session, such as OTLP metric samples, are
+// skipped: they carry nothing to learn from and would otherwise crowd out sessions
+// because each fresh sample sorts to the top.
+func selectedEvaluationInputs() ([]learning.EvaluationInput, error) {
 	logPath := memoryLogPath()
 	if memoryOpts.traceID != "" {
 		show, ok, err := dashboard.ShowTrace(logPath, memoryOpts.traceID, dashboard.TraceQuery{Limit: 2000})
@@ -416,6 +565,10 @@ func selectedEvaluationInputs(project asymptoteobserve.LearningProjectV1) ([]lea
 		}
 		if !ok {
 			return nil, fmt.Errorf("trace not found: %s", memoryOpts.traceID)
+		}
+		project, err := learning.ProjectForTrace(memoryOpts.projectPath, show.Trace)
+		if err != nil {
+			return nil, err
 		}
 		return []learning.EvaluationInput{{Project: project, Trace: show}}, nil
 	}
@@ -440,6 +593,9 @@ func selectedEvaluationInputs(project asymptoteobserve.LearningProjectV1) ([]lea
 	}
 	inputs := make([]learning.EvaluationInput, 0, len(traces.Traces))
 	for _, summary := range traces.Traces {
+		if strings.HasPrefix(summary.ID, "event:") {
+			continue
+		}
 		show, ok, err := dashboard.ShowTrace(logPath, summary.ID, dashboard.TraceQuery{Limit: 2000})
 		if err != nil {
 			return nil, err
@@ -447,9 +603,43 @@ func selectedEvaluationInputs(project asymptoteobserve.LearningProjectV1) ([]lea
 		if !ok {
 			continue
 		}
+		project, err := learning.ProjectForTrace(memoryOpts.projectPath, show.Trace)
+		if err != nil {
+			return nil, err
+		}
 		inputs = append(inputs, learning.EvaluationInput{Project: project, Trace: show})
 	}
 	return inputs, nil
+}
+
+// candidateContentFromFlags collects the reviewer-written content flags shared by
+// "candidates create" and "candidates approve". The body comes from --body or
+// --body-file, where "-" reads stdin so multi-line lessons need no shell quoting.
+func candidateContentFromFlags(cmd *cobra.Command) (learning.CandidateContent, error) {
+	body := memoryOpts.body
+	if strings.TrimSpace(memoryOpts.bodyFile) != "" {
+		if strings.TrimSpace(body) != "" {
+			return learning.CandidateContent{}, fmt.Errorf("pass --body or --body-file, not both")
+		}
+		var data []byte
+		var err error
+		if memoryOpts.bodyFile == "-" {
+			data, err = io.ReadAll(cmd.InOrStdin())
+		} else {
+			data, err = os.ReadFile(memoryOpts.bodyFile)
+		}
+		if err != nil {
+			return learning.CandidateContent{}, fmt.Errorf("read body: %w", err)
+		}
+		body = string(data)
+	}
+	return learning.CandidateContent{
+		Kind:          memoryOpts.kind,
+		Title:         memoryOpts.title,
+		Body:          body,
+		Applicability: memoryOpts.applicability,
+		Tags:          memoryOpts.tags,
+	}, nil
 }
 
 func memoryQuery() (learning.Query, error) {

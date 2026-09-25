@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,9 +24,12 @@ func TestMemoryEvaluationCommandsRegistered(t *testing.T) {
 		{"memory", "evaluations", "show"},
 		{"memory", "candidates", "list"},
 		{"memory", "candidates", "show"},
+		{"memory", "candidates", "create"},
 		{"memory", "candidates", "approve"},
 		{"memory", "candidates", "reject"},
 		{"memory", "candidates", "supersede"},
+		{"memory", "approved", "list"},
+		{"memory", "approved", "show"},
 		{"memory", "skills", "preview"},
 		{"memory", "skills", "install"},
 	} {
@@ -204,44 +206,206 @@ func writeMemoryCommandFixture(t *testing.T) (string, string) {
 		Message:       "Fix flaky package smoke",
 		Repository:    project,
 	}
-	line, err := json.Marshal(event)
-	if err != nil {
-		t.Fatal(err)
+	// A later OTLP metric sample with no session: it forms a single-event trace that
+	// sorts above the session and must not be selected for evaluation.
+	metric := schema.Event{
+		Timestamp:     "2026-09-21T02:00:00Z",
+		Vendor:        schema.Vendor,
+		Product:       schema.Product,
+		SchemaVersion: schema.SchemaVersion,
+		Event:         schema.EventInfo{ID: "metric-1", Kind: "agent_runtime", Action: "metric.observed", Category: "metric"},
+		Severity:      schema.SeverityInfo,
+		Endpoint:      schema.EndpointInfo{OS: "darwin"},
+		Harness:       schema.HarnessInfo{Name: "cursor"},
+		Message:       "cursor.active_time.total",
 	}
-	if err := os.WriteFile(logPath, append(line, '\n'), 0644); err != nil {
+	var lines []byte
+	for _, item := range []schema.Event{event, metric} {
+		line, err := json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(append(lines, line...), '\n')
+	}
+	if err := os.WriteFile(logPath, lines, 0644); err != nil {
 		t.Fatal(err)
 	}
 	return logPath, project
 }
 
+func TestMemoryEvaluationsRunSkipsSessionlessTraces(t *testing.T) {
+	logPath, project := writeMemoryCommandFixture(t)
+	resetMemoryOpts(t)
+	memoryOpts.logPath = logPath
+	memoryOpts.projectPath = project
+	memoryOpts.dryRun = true
+	memoryOpts.jsonOutput = true
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runMemoryEvaluationsRun(cmd, nil); err != nil {
+		t.Fatalf("runMemoryEvaluationsRun returned error: %v", err)
+	}
+	var result evaluationRunResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v\n%s", err, out.String())
+	}
+	if result.TraceCount != 1 || len(result.Previews) != 1 || result.Previews[0].TraceID != "session:cursor:s1" {
+		t.Fatalf("expected only the session trace to be selected, got %#v", result)
+	}
+}
+
+func TestMemoryCandidatesCreateScopesToTraceRepository(t *testing.T) {
+	logPath, project := writeMemoryCommandFixture(t)
+	resetMemoryOpts(t)
+	memoryOpts.logPath = logPath
+	// No --project: the trace recorded its repository, so memory must land there and
+	// not in the reviewer's working directory.
+	memoryOpts.traceID = "session:cursor:s1"
+	memoryOpts.kind = asymptoteobserve.LearningMemoryKindDebuggingPattern
+	memoryOpts.title = "Retry package smoke once"
+	memoryOpts.bodyFile = "-"
+	memoryOpts.tags = []string{"smoke", "smoke", " "}
+	memoryOpts.jsonOutput = true
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader("Rerun package smoke once after confirming the failure is transient.\n"))
+	if err := runMemoryCandidatesCreate(cmd, nil); err != nil {
+		t.Fatalf("runMemoryCandidatesCreate returned error: %v", err)
+	}
+	var candidate asymptoteobserve.LearningCandidateV1
+	if err := json.Unmarshal(out.Bytes(), &candidate); err != nil {
+		t.Fatalf("decode candidate: %v\n%s", err, out.String())
+	}
+	want, err := learning.ResolveProject(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Project.ID != want.ID {
+		t.Fatalf("candidate project = %#v, want %#v", candidate.Project, want)
+	}
+	if candidate.State != asymptoteobserve.LearningCandidateStateCandidate || candidate.SourceEvaluationID != "" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+	if candidate.Body != "Rerun package smoke once after confirming the failure is transient." {
+		t.Fatalf("body = %q", candidate.Body)
+	}
+	if len(candidate.Evidence) != 1 || candidate.Evidence[0].TraceID != "session:cursor:s1" || len(candidate.Evidence[0].EventIDs) != 1 {
+		t.Fatalf("evidence = %#v", candidate.Evidence)
+	}
+	if strings.Join(candidate.Tags, ",") != "smoke" {
+		t.Fatalf("tags = %#v", candidate.Tags)
+	}
+
+	stored, err := memoryStore().ListCandidates(learning.Query{ProjectID: want.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].ID != candidate.ID {
+		t.Fatalf("stored candidates = %#v", stored)
+	}
+}
+
+func TestMemoryCandidatesCreateRejectsUnknownKind(t *testing.T) {
+	logPath, project := writeMemoryCommandFixture(t)
+	resetMemoryOpts(t)
+	memoryOpts.logPath = logPath
+	memoryOpts.projectPath = project
+	memoryOpts.traceID = "session:cursor:s1"
+	memoryOpts.kind = "anecdote"
+	memoryOpts.title = "t"
+	memoryOpts.body = "b"
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	err := runMemoryCandidatesCreate(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown memory kind") {
+		t.Fatalf("expected unknown kind error, got %v", err)
+	}
+	if _, statErr := os.Stat(learning.PathForRuntimeLog(logPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("a rejected candidate must not create the store, stat err=%v", statErr)
+	}
+}
+
+func TestMemoryCandidatesApproveReplacesContent(t *testing.T) {
+	logPath, project := writeMemoryCommandFixture(t)
+	resetMemoryOpts(t)
+	memoryOpts.logPath = logPath
+	memoryOpts.projectPath = project
+	resolved, err := learning.ResolveProject(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := testCommandCandidate(t)
+	candidate.Project = resolved
+	candidate.ID = learning.CandidateID(candidate)
+	if err := memoryStore().PutCandidate(candidate); err != nil {
+		t.Fatal(err)
+	}
+	memoryOpts.reason = "reviewed the trace"
+	memoryOpts.kind = asymptoteobserve.LearningMemoryKindGotcha
+	memoryOpts.title = "Package smoke needs a warm cache"
+	memoryOpts.body = "The first smoke run after a clean checkout fails on cache misses. Run it twice."
+	memoryOpts.jsonOutput = true
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runMemoryCandidatesApprove(cmd, []string{candidate.ID}); err != nil {
+		t.Fatalf("runMemoryCandidatesApprove returned error: %v", err)
+	}
+	var result struct {
+		Candidate asymptoteobserve.LearningCandidateV1 `json:"candidate"`
+		Memory    asymptoteobserve.LearningMemoryV1    `json:"memory"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v\n%s", err, out.String())
+	}
+	for name, got := range map[string][2]string{
+		"kind":  {result.Candidate.Kind, result.Memory.Kind},
+		"title": {result.Candidate.Title, result.Memory.Title},
+		"body":  {result.Candidate.Body, result.Memory.Body},
+	} {
+		if got[0] != got[1] {
+			t.Fatalf("%s differs between candidate %q and memory %q", name, got[0], got[1])
+		}
+	}
+	if result.Memory.Kind != asymptoteobserve.LearningMemoryKindGotcha || result.Memory.Title != memoryOpts.title || result.Memory.Body != memoryOpts.body {
+		t.Fatalf("memory = %#v", result.Memory)
+	}
+	if strings.Contains(result.Memory.Body, "no lesson text was extracted") {
+		t.Fatalf("placeholder body survived approval: %q", result.Memory.Body)
+	}
+	if result.Memory.Applicability != candidate.Applicability {
+		t.Fatalf("applicability should be kept when not overridden, got %q", result.Memory.Applicability)
+	}
+
+	memoryOpts.kind = ""
+	var list bytes.Buffer
+	cmd.SetOut(&list)
+	if err := runMemoryApprovedList(cmd, nil); err != nil {
+		t.Fatalf("runMemoryApprovedList returned error: %v", err)
+	}
+	if !strings.Contains(list.String(), result.Memory.ID) {
+		t.Fatalf("approved list missing memory: %s", list.String())
+	}
+	var show bytes.Buffer
+	cmd.SetOut(&show)
+	memoryOpts.jsonOutput = false
+	if err := runMemoryApprovedShow(cmd, []string{result.Memory.ID}); err != nil {
+		t.Fatalf("runMemoryApprovedShow returned error: %v", err)
+	}
+	if !strings.Contains(show.String(), "Run it twice.") {
+		t.Fatalf("approved show missing body: %s", show.String())
+	}
+}
+
 func resetMemoryOpts(t *testing.T) {
 	t.Helper()
 	previous := memoryOpts
-	memoryOpts = struct {
-		userMode    bool
-		systemMode  bool
-		logPath     string
-		jsonOutput  bool
-		projectPath string
-		limit       int
-		page        int
-		query       string
-		harness     string
-		traceID     string
-		since       string
-		until       string
-		dryRun      bool
-		jevEndpoint string
-		jevAPIKey   string
-		jevModel    string
-		jevCost     float64
-		timeout     time.Duration
-		state       string
-		kind        string
-		reason      string
-		replacement string
-		force       bool
-	}{userMode: true, limit: 25, page: 1, jevEndpoint: learning.DefaultJevEndpoint, jevModel: learning.DefaultJevModel, jevCost: learning.DefaultCostPerTrace}
+	memoryOpts = memoryOptions{userMode: true, limit: 25, page: 1, jevEndpoint: learning.DefaultJevEndpoint, jevModel: learning.DefaultJevModel, jevCost: learning.DefaultCostPerTrace}
 	t.Cleanup(func() { memoryOpts = previous })
 }
 
